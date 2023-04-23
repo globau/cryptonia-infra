@@ -1,0 +1,34 @@
+version: "3.9"
+services:
+  bungeecord:
+    build: bungeecord
+    depends_on:
+      - db
+    volumes:
+      - type: bind
+        source: ./instances/bungeecord
+        target: /minecraft
+    ports:
+      - "25555:25575"
+  lobby:
+    build: lobby
+    depends_on:
+      - db
+    volumes:
+      - type: bind
+        source: ./instances/lobby
+        target: /minecraft
+    expose:
+      - "25570"
+  db:
+    image: mysql:5.7
+    restart: always
+    environment:
+      MYSQL_DATABASE: minecraft
+      MYSQL_USER: minecraft
+      MYSQL_PASSWORD: secret
+      MYSQL_ROOT_PASSWORD: secret
+    volumes:
+      - cryptonia-db:/var/lib/mysql
+volumes:
+  cryptonia-db:

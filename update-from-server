@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+import configparser
+import subprocess
+from ruamel.yaml import YAML
+import sys
+from pathlib import Path
+
+LOCAL_ROOT = Path(__file__).parent
+REMOTE_ROOT = "/home/kidzone/opt"
+
+
+class Error(Exception):
+    pass
+
+
+def remote_run(cmd: str, *, check: bool = False) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["ssh", "cryptonia.in", cmd],
+        encoding="utf8",
+        stdout=subprocess.PIPE,
+        check=check,
+    )
+
+
+def remote_capture(cmd: str) -> str:
+    return remote_run(cmd, check=True).stdout
+
+
+def remote_resolve(remote_file: str) -> str:
+    assert remote_file.startswith(("/", "~"))
+    return remote_capture(f'readlink --canonicalize "{remote_file}"').strip()
+
+
+def remote_fetch(remote_file: str, local_file: Path) -> None:
+    assert remote_file.startswith("/")
+    print(f"downloading {remote_file}")
+    if remote_file.endswith("/"):
+        local_file = local_file.parent
+        remote_file = remote_file.rstrip("/")
+    remote_file = remote_resolve(remote_file)
+    subprocess.run(
+        ["rsync", "--archive", "--delete", f"cryptonia.in:{remote_file}", local_file],
+        check=True,
+    )
+
+
+def relative_file(origin_file: Path, target_file: Path) -> Path:
+    def _relative(origin_path: Path, target_path: Path) -> Path:
+        try:
+            return target_path.relative_to(origin_path)
+        except ValueError:
+            return Path("..") / _relative(origin_path.parent, target_path)
+
+    return _relative(origin_file.parent, target_file.parent) / target_file.name
+
+
+def mirror_jar(remote_link: str, local_link: Path, local_jars: Path) -> None:
+    if local_link.exists():
+        assert local_link.is_symlink(), local_link
+    resolved_file = remote_resolve(remote_link)
+    assert resolved_file, remote_link
+    jar_file = local_jars / Path(resolved_file).name
+    if jar_file.exists():
+        print(f"{jar_file.name} up to date")
+    else:
+        remote_fetch(resolved_file, jar_file)
+    local_link.unlink(missing_ok=True)
+    local_link.symlink_to(relative_file(local_link, jar_file))
+
+
+def mirror(remote_path: str, local_path: Path, filenames: list[str]) -> None:
+    for remote_file in filenames:
+        local_file = local_path / remote_file
+        local_file.parent.mkdir(parents=True, exist_ok=True)
+        remote_fetch(f"{remote_path}/{remote_file}", local_file)
+
+
+def yaml_replace(*, filename: Path, path: str, value: str) -> None:
+    yaml = YAML()
+    data = yaml.load(filename)
+
+    ref = data
+    for key in path.split(".")[0:-1]:
+        real_key = key
+        for k in ref.keys():
+            if k.lower() == key.lower():
+                real_key = k
+                break
+        ref = ref[real_key]
+    name = path.split(".")[-1].lower()
+    for k in ref.keys():
+        if k.lower() == name:
+            ref[k] = value
+            print(f"{filename.relative_to(LOCAL_ROOT)}: replaced {path}")
+            break
+    else:
+        raise Error(f"{filename.relative_to(LOCAL_ROOT)}: replaced failed: {path}")
+
+    yaml.dump(data, filename)
+
+
+def properties_replace(*, filename: Path, name: str, value: str) -> None:
+    lines = filename.read_text().splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("#"):
+            continue
+        line_name, line_value = line.split("=", maxsplit=1)
+        if line_name == name:
+            lines[i] = f"{name}={value}"
+            break
+    else:
+        raise Error(f"{filename.relative_to(LOCAL_ROOT)}: replaced failed: {name}")
+
+    content = "\n".join(lines)
+    filename.write_text(f"{content}\n")
+
+
+def mirror_server(cfg: configparser.ConfigParser) -> None:
+    # parse config
+    server_cfg = cfg["server"]
+    remote_path = f"{REMOTE_ROOT}/{server_cfg['remote_path']}"
+    local_path = LOCAL_ROOT / f"instances/{server_cfg.get('name')}"
+    server_jar = server_cfg.get("jar")
+    config_files = [
+        n for n in server_cfg.get("config", fallback="").split(" ") if n != ""
+    ]
+
+    # init paths
+    jar_path = local_path / "jars"
+    jar_path.mkdir(parents=True, exist_ok=True)
+    plugins_path = local_path / "plugins"
+    plugins_path.mkdir(parents=True, exist_ok=True)
+
+    # server jar and its config
+    mirror_jar(f"{remote_path}/{server_jar}", local_path / server_jar, jar_path)
+    mirror(remote_path, local_path, config_files)
+
+    # plugin jars
+    jars: list[Path] = []
+    for remote_jar in remote_capture(f"ls {remote_path}/plugins/*.jar").splitlines():
+        filename = Path(remote_jar).name
+        mirror_jar(
+            remote_jar,
+            plugins_path / filename,
+            jar_path,
+        )
+        jars.append(plugins_path / filename)
+    for local_jar in plugins_path.glob("*.jar"):
+        if local_jar not in jars:
+            print(f"deleting {local_jar.relative_to(local_path)}")
+            local_jar.unlink()
+
+    # plugin configs
+    for section_name in [s for s in cfg.sections() if s.startswith("plugin:")]:
+        name = section_name[len("plugin:") :]
+        remote_plugin_path = f"{remote_path}/plugins/{name}"
+        local_plugin_path = plugins_path / name
+        assert remote_resolve(remote_plugin_path), remote_plugin_path
+        local_plugin_path.mkdir(parents=True, exist_ok=True)
+        mirror(
+            remote_plugin_path,
+            local_plugin_path,
+            [
+                n
+                for n in cfg.get(section_name, "config", fallback="").split(" ")
+                if n != ""
+            ],
+        )
+
+    # post-process: symlinks
+    for section_name in [s for s in cfg.sections() if s.startswith("link:")]:
+        filename = local_path / section_name.split(":")[1]
+        target = relative_file(
+            filename, Path(cfg.get(section_name, "target")).resolve()
+        )
+        print(f"{filename.relative_to(LOCAL_ROOT)} -> {target}")
+        filename.unlink(missing_ok=True)
+        filename.symlink_to(target)
+
+    # post-processing: replace values
+    for section_name in [s for s in cfg.sections() if s.startswith("replace:")]:
+        filename = section_name.split(":")[1]
+        for name in cfg.options(section_name):
+            if filename.endswith(".yml"):
+                yaml_replace(
+                    filename=local_path / filename,
+                    path=name,
+                    value=cfg.get(section_name, name),
+                )
+            elif filename.endswith(".properties"):
+                properties_replace(
+                    filename=local_path / filename,
+                    name=name,
+                    value=cfg.get(section_name, name),
+                )
+            else:
+                raise NotImplementedError(filename)
+
+
+def main() -> None:
+    for ini_file in sorted(LOCAL_ROOT.glob("*.ini")):
+        cfg = configparser.ConfigParser()
+        with ini_file.open() as f:
+            cfg.read_file(f)
+        mirror_server(cfg)
+
+
+try:
+    main()
+except Error as e:
+    print(e, file=sys.stderr)
+    sys.exit(1)
