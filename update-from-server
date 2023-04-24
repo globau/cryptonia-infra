@@ -127,7 +127,7 @@ def mirror_server(cfg: configparser.ConfigParser) -> None:
     # init paths
     remote_path = f"{REMOTE_ROOT}/{server_cfg['remote_path']}"
     local_path = LOCAL_ROOT / f"instances/{server_cfg.get('name')}"
-    jar_path = LOCAL_ROOT / "jars"
+    jar_path = local_path / "jars"
     jar_path.mkdir(parents=True, exist_ok=True)
     plugins_path = local_path / "plugins"
     plugins_path.mkdir(parents=True, exist_ok=True)
