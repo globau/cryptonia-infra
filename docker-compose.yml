@@ -1,7 +1,8 @@
 version: "3.9"
 services:
   bungeecord:
-    build: bungeecord
+    build:
+      dockerfile: bungeecord.Dockerfile
     depends_on:
       - db
     volumes:
@@ -11,7 +12,8 @@ services:
     ports:
       - "25555:25575"
   lobby:
-    build: lobby
+    build:
+      dockerfile: lobby.Dockerfile
     depends_on:
       - db
     volumes:
