@@ -1,1 +1,4 @@
-ruamel.yaml
+black==23.3.0
+isort==5.12.0
+ruamel.yaml==0.17.21
+ruff==0.0.275
