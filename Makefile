@@ -1,16 +1,10 @@
-.PHONY: clean distclean run update format
+.PHONY: clean distclean format
 
-py_files:=update-from-server
+py_files:=$(wildcard src/*.py)
 
 default:
-	@echo "target required: eg. 'make run' or 'make update'"
+	@echo "target required: format, test"
 	@exit 2
-
-run:
-	docker compose up --build
-
-update: venv/.updated
-	venv/bin/python3 ./update-from-server
 
 format: venv/.updated
 	venv/bin/ruff --config .ruff.toml --cache-dir .git/ruff_cache --fix-only --exit-zero --show-fixes $(py_files)

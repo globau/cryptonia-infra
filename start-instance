@@ -9,4 +9,4 @@ while [[ -n "$LINK" ]]; do
 done
 ROOT="$PWD"
 cd "$CWD"
-exec "$ROOT/venv/bin/python3" "$ROOT/src/cli_update.py" "$@"
+exec "$ROOT/venv/bin/python3" "$ROOT/src/cli_start.py" "$@"
