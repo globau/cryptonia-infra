@@ -1,9 +1,9 @@
-.PHONY: clean distclean format
+.PHONY: default
 
 py_files:=$(wildcard src/*.py)
 
 default:
-	@echo "target required: format, test"
+	@echo "target required: venv, format, test"
 	@exit 2
 
 format: venv/.updated
@@ -16,6 +16,7 @@ test: venv/.updated
 	venv/bin/black --check $(py_files)
 	venv/bin/isort --multi-line 3 --line-width 88 --trailing-comma --check-only $(py_files)
 
+venv: venv/.updated
 venv/.updated: requirements.txt
 	[ -e venv/bin/python ] || python3 -m venv venv
 	venv/bin/pip install -U pip wheel --disable-pip-version-check
