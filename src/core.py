@@ -1,11 +1,14 @@
 import argparse
 import contextlib
+import logging
 import os
 import sys
 from collections.abc import Generator
 from configparser import ConfigParser
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger("cryptonia-infra")
 
 
 class Error(Exception):
@@ -31,9 +34,22 @@ def relative_file(origin_file: Path, target_file: Path) -> Path:
     return _relative(origin_file.parent, target_file.parent) / target_file.name
 
 
+class _StreamHandler(logging.StreamHandler):
+    def handleError(self, record: logging.LogRecord) -> None:  # noqa: N802
+        exc_info = sys.exc_info()[0]
+        if exc_info and exc_info.__name__ == BrokenPipeError.__name__:
+            sys.exit(0)
+        super().handleError(record)
+
+
 @contextlib.contextmanager
 def main_wrapper() -> Generator[[str, ConfigParser, Paths], None, None]:
     os.chdir(Path(__file__).parent.parent)
+
+    handler = _StreamHandler(sys.stdout)
+    logger.addHandler(handler)
+    if os.environ.get("DEBUG"):
+        logger.setLevel(logging.DEBUG)
 
     parser = argparse.ArgumentParser()
     parser.add_argument("filename", help="ini filename")

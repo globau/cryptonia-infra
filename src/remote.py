@@ -1,21 +1,33 @@
+import logging
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
-from core import Paths, relative_file
+from core import Paths, logger, relative_file
 
 
 def run(cmd: str, *, check: bool = False) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run(
-            ["ssh", "cryptonia.in", cmd],
+        ssh_cmd = ["ssh", "cryptonia.in", cmd]
+        logger.debug(f"$ {shlex.join(ssh_cmd)}")
+        p = subprocess.run(
+            ssh_cmd,
             encoding="utf8",
             stdout=subprocess.PIPE,
             check=check,
         )
+        if logger.isEnabledFor(logging.DEBUG):
+            if p.stderr is not None and p.stderr != "":
+                for line in p.stderr.splitlines():
+                    logger.debug(f"stderr: {line}")
+            if p.stdout is not None and p.stdout != "":
+                for line in p.stdout.splitlines():
+                    logger.debug(f"stdout: {line}")
+        return p
     except subprocess.CalledProcessError as e:
-        print(f"when running: {cmd}", file=sys.stderr)
+        logger.error(f"when running: {cmd}")
         sys.exit(e.returncode)
 
 
@@ -48,10 +60,16 @@ def fetch(*, paths: Paths, remote_file: str, local_file: Path) -> None:
         local_file = local_file.parent
         remote_file = remote_file.rstrip("/")
     remote_file = resolve(remote_file)
-    subprocess.run(
-        ["rsync", "--archive", "--delete", f"cryptonia.in:{remote_file}", local_file],
-        check=True,
-    )
+
+    cmd = [
+        "rsync",
+        "--archive",
+        "--delete",
+        f"cryptonia.in:{remote_file}",
+        str(local_file),
+    ]
+    logger.debug(f"$ {shlex.join(cmd)}")
+    subprocess.run(cmd, check=True)
     os.utime(local_file, (mtime, mtime))
 
 
