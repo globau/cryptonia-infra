@@ -11,4 +11,3 @@ USER minecraft
 
 STOPSIGNAL SIGINT
 WORKDIR /minecraft
-CMD ["java", "-Xmx512M", "-Xms512M", "-jar", "BungeeCord.jar"]
