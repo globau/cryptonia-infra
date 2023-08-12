@@ -1,15 +1,15 @@
 import os
 import sys
-from configparser import ConfigParser, SectionProxy
 from pathlib import Path
 
 from ruamel.yaml import YAML
 
 import remote
-from core import Error, Paths, main_wrapper, relative_file
+from config import Instance
+from core import Error, main_wrapper
 
 
-def yaml_replace(*, paths: Paths, filename: Path, path: str, value: str) -> None:
+def yaml_replace(ins: Instance, filename: Path, path: str, value: str) -> None:
     yaml = YAML()
     data = yaml.load(filename)
 
@@ -24,6 +24,8 @@ def yaml_replace(*, paths: Paths, filename: Path, path: str, value: str) -> None
                 if k.lower() == key.lower():
                     real_key = k
                     break
+            if real_key not in ref:
+                raise Error(f"{filename}: bad path '{path}': missing key")
             ref = ref[real_key]
         elif isinstance(ref, list):
             try:
@@ -39,33 +41,33 @@ def yaml_replace(*, paths: Paths, filename: Path, path: str, value: str) -> None
         if k.lower() == name:
             if ref[k] != value:
                 ref[k] = value
-                print(f"{filename.relative_to(paths.local_path)}: {path} -> {value}")
+                print(
+                    f"\x1b[1;33m{filename.relative_to(ins.root_path)}: {path} -> {value}\x1b[0m"
+                )
             break
     else:
-        raise Error(
-            f"{filename.relative_to(paths.local_path)}: replaced failed: {path}"
-        )
+        raise Error(f"{filename.relative_to(ins.root_path)}: replaced failed: {path}")
 
     mtime = filename.stat().st_mtime
     yaml.dump(data, filename)
     os.utime(filename, (mtime, mtime))
 
 
-def properties_replace(*, paths: Paths, filename: Path, name: str, value: str) -> None:
+def properties_replace(ins: Instance, filename: Path, path: str, value: str) -> None:
     lines = filename.read_text().splitlines()
     for i, line in enumerate(lines):
         if line.startswith("#"):
             continue
         line_name, line_value = line.split("=", maxsplit=1)
-        if line_name == name:
+        if line_name == path:
             if line_value != value:
-                print(f"{filename.relative_to(paths.local_path)}: {name} -> {value}")
-                lines[i] = f"{name}={value}"
+                print(
+                    f"\x1b[1;33m{filename.relative_to(ins.root_path)}: {path} -> {value}\x1b[0m"
+                )
+                lines[i] = f"{path}={value}"
             break
     else:
-        raise Error(
-            f"{filename.relative_to(paths.local_path)}: replaced failed: {name}"
-        )
+        raise Error(f"{filename.relative_to(ins.root_path)}: replaced failed: {path}")
 
     content = "\n".join(lines)
     mtime = filename.stat().st_mtime
@@ -73,23 +75,23 @@ def properties_replace(*, paths: Paths, filename: Path, name: str, value: str) -
     os.utime(filename, (mtime, mtime))
 
 
-def conf_replace(*, paths: Paths, filename: Path, name: str, value: str) -> None:
+def conf_replace(ins: Instance, filename: Path, path: str, value: str) -> None:
     lines = filename.read_text().splitlines()
     for i, line in enumerate(lines):
         if line.startswith("#") or line.strip() == "":
             continue
         line_name, line_value = line.split(":", maxsplit=1)
-        if line_name == name:
+        if line_name == path:
             if line_value.lstrip() != value:
-                print(f"{filename.relative_to(paths.local_path)}: {name} -> {value}")
+                print(
+                    f"\x1b[1;33m{filename.relative_to(ins.root_path)}: {path} -> {value}\x1b[0m"
+                )
                 if not (value.isdigit() or value in ("true", "false")):
                     value = f'"{value}"'
-                lines[i] = f"{name}: {value}"
+                lines[i] = f"{path}: {value}"
             break
     else:
-        raise Error(
-            f"{filename.relative_to(paths.local_path)}: replaced failed: {name}"
-        )
+        raise Error(f"{filename.relative_to(ins.root_path)}: replaced failed: {path}")
 
     content = "\n".join(lines)
     mtime = filename.stat().st_mtime
@@ -97,20 +99,10 @@ def conf_replace(*, paths: Paths, filename: Path, name: str, value: str) -> None
     os.utime(filename, (mtime, mtime))
 
 
-def build_remote_mtimes(*, paths: Paths, cfg: ConfigParser) -> None:
-    config_files = [
-        f"{paths.remote_path}/{name}" for name in cfg["server"]["config"].split(" ")
-    ]
-    for section_name in [s for s in cfg.sections() if s.startswith("plugin:")]:
-        plugin_name = section_name[len("plugin:") :]
-        config_files.extend(
-            [
-                f"{paths.remote_path}/plugins/{plugin_name}/{name}"
-                for name in cfg.get(section_name, "config", fallback="").split(" ")
-                if name
-            ]
-        )
-
+def build_remote_mtimes(ins: Instance) -> None:
+    config_files = [f.remote for f in ins.server.files]
+    for plugin in ins.plugins.values():
+        config_files.extend(f.remote for f in plugin.files)
     assert not any(name.endswith("/") for name in config_files)
 
     files = " ".join(config_files)
@@ -119,159 +111,111 @@ def build_remote_mtimes(*, paths: Paths, cfg: ConfigParser) -> None:
     )
     for line in stats.splitlines():
         mtime, remote_file = line.split(" ", maxsplit=1)
-        assert remote_file.startswith(paths.remote_path), remote_file
-        paths.mtimes[remote_file] = int(mtime)
+        assert remote_file.startswith(ins.server.remote_path), remote_file
+        ins.mtimes[remote_file] = int(mtime)
 
 
-def update_server_jar(*, paths: Paths, server_cfg: SectionProxy) -> None:
-    server_jar = server_cfg.get("jar")
-    config_files = [
-        n for n in server_cfg.get("config", fallback="").split(" ") if n != ""
-    ]
-    remote.mirror_jar(
-        paths=paths,
-        remote_link=f"{paths.remote_path}/{server_jar}",
-        local_link=paths.local_path / server_jar,
-    )
-    remote.mirror(
-        paths=paths,
-        remote_path=paths.remote_path,
-        local_path=paths.local_path,
-        filenames=config_files,
-    )
+def check_config(ins: Instance) -> None:
+    local_jar_files = {f.name for f in ins.plugins_path.glob("*.jar")}
+    unhandled_jars = local_jar_files.copy()
 
-
-def update_plugin_jars(*, paths: Paths) -> None:
-    jars: list[Path] = []
-    for remote_jar in remote.capture(
-        f"ls {paths.remote_path}/plugins/*.jar"
-    ).splitlines():
-        filename = Path(remote_jar).name
-        remote.mirror_jar(
-            paths=paths,
-            remote_link=remote_jar,
-            local_link=paths.local_plugins_path / filename,
-        )
-        jars.append(paths.local_plugins_path / filename)
-
-    for local_jar in paths.local_plugins_path.glob("*.jar"):
-        if local_jar not in jars:
-            print(f"deleting {local_jar.relative_to(paths.local_path)}")
-            local_jar.unlink()
-
-
-def update_plugin_configs(*, paths: Paths, cfg: ConfigParser) -> None:
-    jar_files = {f.name for f in paths.local_plugins_path.glob("*.jar")}
-    unhandled_jars = jar_files.copy()
-    extra_sections = []
-
-    for section_name in [s for s in cfg.sections() if s.startswith("plugin:")]:
-        name = section_name.removeprefix("plugin:")
-
-        jar_names = [f"{name}.jar"]
-        if cfg.has_option(section_name, "jars"):
-            jar_names.extend(
-                [
-                    j.strip()
-                    for j in cfg.get(section_name, "jars", fallback="").split(" ")
-                    if j
-                ]
-            )
-        for jar_name in jar_names:
-            if jar_name in unhandled_jars:
-                unhandled_jars.remove(jar_name)
-            if not any(
-                (paths.local_plugins_path / jar_name).exists() for jar_name in jar_names
-            ):
-                extra_sections.append(section_name)
-
-        remote_plugin_path = f"{paths.remote_path}/plugins/{name}"
-        local_plugin_path = paths.local_plugins_path / name
-        assert remote.resolve(remote_plugin_path), remote_plugin_path
-        local_plugin_path.mkdir(parents=True, exist_ok=True)
-        remote.mirror(
-            paths=paths,
-            remote_path=remote_plugin_path,
-            local_path=local_plugin_path,
-            filenames=[
-                n
-                for n in cfg.get(section_name, "config", fallback="").split(" ")
-                if n != ""
-            ],
-        )
+    for plugin in ins.plugins.values():
+        for jar_file in plugin.jar_files:
+            if jar_file.name in unhandled_jars:
+                unhandled_jars.remove(jar_file.name)
 
     if unhandled_jars:
         print("failed to find config entries for the following jars:")
         for name in sorted(unhandled_jars):
             print(f"- {name}")
         print("create [plugin:<name>] or add to existing section's 'jars' option")
-
-    if extra_sections:
-        print("failed to find jars for the following config entries:")
-        for name in sorted(extra_sections):
-            print(f"- {name}")
-
-    if unhandled_jars or extra_sections:
         sys.exit(1)
 
 
-def post_process_replace_values(*, paths: Paths, cfg: ConfigParser) -> None:
-    for section_name in [s for s in cfg.sections() if s.startswith("replace:")]:
-        filename = section_name.split(":")[1]
-        for name in cfg.options(section_name):
-            if filename.endswith(".yml"):
-                yaml_replace(
-                    paths=paths,
-                    filename=paths.local_path / filename,
-                    path=name,
-                    value=cfg.get(section_name, name),
-                )
-            elif filename.endswith(".properties"):
-                properties_replace(
-                    paths=paths,
-                    filename=paths.local_path / filename,
-                    name=name,
-                    value=cfg.get(section_name, name),
-                )
-            elif filename.endswith(".conf"):
-                conf_replace(
-                    paths=paths,
-                    filename=paths.local_path / filename,
-                    name=name,
-                    value=cfg.get(section_name, name),
-                )
+def update_server_jar(ins: Instance) -> None:
+    remote.mirror_jar(
+        ins,
+        remote_link=ins.server.jar_file.remote,
+        local_link=ins.server.jar_file.local,
+    )
+    remote.mirror(ins, ins.server.files)
+
+
+def update_plugin_jars(ins: Instance) -> None:
+    jars: list[Path] = []
+    for remote_jar in remote.capture(
+        f"ls {ins.server.remote_path}/plugins/*.jar"
+    ).splitlines():
+        remote_path = Path(remote_jar)
+        plugin_name = remote_path.stem
+        filename = remote_path.name
+
+        if plugin_name in ins.plugins and ins.plugins[plugin_name].disabled:
+            print(f"Plugin {plugin_name} is disabled")
+            continue
+
+        plugin_jar = ins.plugins_path / filename
+        remote.mirror_jar(
+            ins,
+            remote_link=remote_jar,
+            local_link=plugin_jar,
+        )
+        jars.append(plugin_jar)
+
+    for local_jar in ins.plugins_path.glob("*.jar"):
+        if local_jar not in jars:
+            print(f"deleting {local_jar.relative_to(ins.root_path)}")
+            local_jar.unlink()
+
+
+def update_plugin_files(ins: Instance) -> None:
+    for plugin in ins.plugins.values():
+        remote.mirror(ins, plugin.files)
+
+
+def post_process_symlinks(ins: Instance) -> None:
+    for link in ins.links:
+        if not link.filename.exists() or str(link.filename.readlink()) != link.target:
+            print(f"{link.filename.relative_to(ins.root_path)} -> {link.target}")
+            link.filename.unlink(missing_ok=True)
+            link.filename.symlink_to(link.target)
+
+
+def post_process_replace_values(ins: Instance) -> None:
+    for replacement in ins.replacements:
+        suffix = replacement.filename.suffix
+        if suffix == ".template":
+            suffix = Path(replacement.filename.name.removesuffix(".template")).suffix
+        for path, value in replacement.mappings.items():
+            if suffix == ".yml":
+                yaml_replace(ins, replacement.filename, path, value)
+            elif suffix == ".properties":
+                properties_replace(ins, replacement.filename, path, value)
+            elif suffix == ".conf":
+                conf_replace(ins, replacement.filename, path, value)
             else:
-                raise NotImplementedError(filename)
+                raise NotImplementedError()
 
 
-def post_process_symlinks(*, paths: Paths, cfg: ConfigParser) -> None:
-    for section_name in [s for s in cfg.sections() if s.startswith("link:")]:
-        filename = paths.local_path / section_name.split(":")[1]
-        target = Path(cfg.get(section_name, "target")).resolve()
-        if filename.resolve() != target:
-            relative_target = relative_file(filename, target)
-            print(f"{filename.relative_to(paths.local_path)} -> {relative_target}")
-            filename.unlink(missing_ok=True)
-            filename.symlink_to(relative_target)
+def mirror_server(ins: Instance) -> None:
+    print(f"updating {ins}\n")
 
+    check_config(ins)
 
-def mirror_server(name: str, cfg: ConfigParser, paths: Paths) -> None:
-    print(f"updating {name}\n")
+    build_remote_mtimes(ins)
 
-    build_remote_mtimes(paths=paths, cfg=cfg)
+    update_server_jar(ins)
+    update_plugin_jars(ins)
+    update_plugin_files(ins)
 
-    update_server_jar(paths=paths, server_cfg=cfg["server"])
-    update_plugin_jars(paths=paths)
-    update_plugin_configs(paths=paths, cfg=cfg)
-
-    post_process_symlinks(paths=paths, cfg=cfg)
-    post_process_replace_values(paths=paths, cfg=cfg)
+    post_process_symlinks(ins)
+    post_process_replace_values(ins)
 
 
 def main() -> None:
     try:
-        with main_wrapper() as (name, cfg, paths):
-            mirror_server(name, cfg, paths)
+        with main_wrapper() as (ins):
+            mirror_server(ins)
     except Error as e:
         print(e, file=sys.stderr)
         sys.exit(1)

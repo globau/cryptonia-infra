@@ -1,12 +1,12 @@
+import os
 import subprocess
 import sys
-from configparser import ConfigParser
 
-from core import Error, Paths, main_wrapper
+from core import Error, Instance, main_wrapper
 
 
-def start_instance(name: str, cfg: ConfigParser, paths: Paths) -> None:
-    image_name = f"cryptonia.{name}"
+def start_instance(ins: Instance) -> None:
+    image_name = f"cryptonia.{ins.name}"
 
     print(f"build {image_name}")
     p = subprocess.run(
@@ -15,7 +15,17 @@ def start_instance(name: str, cfg: ConfigParser, paths: Paths) -> None:
     if p.returncode != 0:
         sys.exit(p.returncode)
 
-    malloc = cfg.get("server", "xmx", fallback="512M")
+    if os.environ.get("DEBUG"):
+        cmd = []
+    else:
+        cmd = [
+            "java",
+            f"-Xmx{ins.server.xmx}",
+            f"-Xms{ins.server.xmx}",
+            "-jar",
+            ins.server.jar_file.name,
+            "nogui",
+        ]
 
     print(f"running {image_name}")
     subprocess.run(
@@ -25,16 +35,10 @@ def start_instance(name: str, cfg: ConfigParser, paths: Paths) -> None:
         + ["--tty", "--interactive"]
         + ["--network", "host"]
         + ["--env", "TZ=Australia/Perth"]
-        + ["--mount", f"type=bind,source={paths.local_path},target=/minecraft"]
+        + ["--mount", f"type=bind,source={ins.instances_path},target=/minecraft"]
+        + ["--workdir", f"/minecraft/{ins.name}"]
         + [image_name]
-        + [
-            "java",
-            f"-Xmx{malloc}",
-            f"-Xms{malloc}",
-            "-jar",
-            cfg.get("server", "jar"),
-            "nogui",
-        ]
+        + cmd
     )
     if p.returncode != 0:
         sys.exit(p.returncode)
@@ -42,8 +46,8 @@ def start_instance(name: str, cfg: ConfigParser, paths: Paths) -> None:
 
 def main() -> None:
     try:
-        with main_wrapper() as (name, cfg, paths):
-            start_instance(name, cfg, paths)
+        with main_wrapper() as (ins):
+            start_instance(ins)
     except Error as e:
         print(e, file=sys.stderr)
         sys.exit(1)
